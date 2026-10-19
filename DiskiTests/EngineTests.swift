@@ -401,4 +401,17 @@ final class EngineTests: XCTestCase {
                      diski * 1000, foundation * 1000, foundation / diski))
         XCTAssertLessThan(diski, foundation)
     }
+
+    // MARK: PR-D2 hard links, rescan events
+
+    func testFolderSizeCountsHardLinksOnce() throws {
+        let big = try makeFile("links/big.bin", size: 5000)
+        try makeFile("links/small.bin", size: 100)
+        try FileManager.default.linkItem(at: big, to: root.appendingPathComponent("links/big-link.bin"))
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("links/sub"), withIntermediateDirectories: true)
+        try FileManager.default.linkItem(at: big, to: root.appendingPathComponent("links/sub/big-link2.bin"))
+        let (bytes, items) = FolderSizer.Walk(root: root.appendingPathComponent("links").path).run()
+        XCTAssertEqual(bytes, 5100)
+        XCTAssertEqual(items, 5, "every link still counts as an item")
+    }
 }

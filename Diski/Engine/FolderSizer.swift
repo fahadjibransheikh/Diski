@@ -262,6 +262,9 @@ final class FolderSizer {
         private var stack: [String]
         private var bytes: Int64 = 0
         private var items = 0
+        /// Inodes of hard-linked files already counted: each is counted once per walk.
+        /// The walk stays on one volume (mount points are skipped), so inode numbers are unique.
+        private var seenLinks = Set<UInt64>()
         private var cancelled = false
         private var lastReport = Date.distantPast
         var onProgress: ((Int64) -> Void)?
@@ -308,7 +311,7 @@ final class FolderSizer {
                 buffer = reader
                 var entriesUntilCancellationCheck = 0
                 var continuing = true
-                try? DirectoryReader.forEachRawEntry(inDirectory: directory, buffer: reader, shouldContinue: {
+                try? DirectoryReader.forEachRawEntry(inDirectory: directory, buffer: reader, linkInfo: true, shouldContinue: {
                     if entriesUntilCancellationCheck == 0 {
                         continuing = !self.isCancelled
                         entriesUntilCancellationCheck = 256
@@ -319,7 +322,7 @@ final class FolderSizer {
                     localItems += 1
                     if entry.isDirectory {
                         if !entry.isMountPoint && !entry.isDataless { subdirectories.append(prefix + entry.nameString) }
-                    } else if entry.size > 0 {
+                    } else if entry.size > 0, entry.linkCount <= 1 || self.seenLinks.insert(entry.fileID).inserted {
                         localBytes += entry.size
                     }
                 }
