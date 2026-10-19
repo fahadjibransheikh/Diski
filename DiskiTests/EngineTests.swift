@@ -469,4 +469,193 @@ final class EngineTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("a-\(tok).txt").path))
         XCTAssertEqual(fileSize(out.appendingPathComponent("b-\(tok).txt")), 20)
     }
+
+    // MARK: PR-G self-destination
+
+    /// A UUID token for file names that may reach the Trash.
+    private func trashToken() -> String { "diskiG-\(UUID().uuidString)" }
+
+    /// Removes whatever the engine sent to the Trash once the test ends (the test host can't list ~/.Trash).
+    private func removeTrashed(by engine: CopyEngine) {
+        let trashed = engine.replaced.map { $0.trashed }
+        addTeardownBlock { for url in trashed { try? FileManager.default.removeItem(at: url) } }
+    }
+
+    /// Copies or moves `real/<token>.txt` into `destination`, another path for `real`, answering Replace to
+    /// any prompt. It must act like the same-folder case: no prompt, source untouched, copy makes "name copy".
+    private func assertSelfDestinationIsSafe(_ mode: CopyEngine.Mode, to destination: URL, clones: Bool,
+                                             file: StaticString = #filePath, line: UInt = #line) throws {
+        let token = trashToken()
+        let source = try makeFile("real/\(token).txt", size: 10, byte: 7)
+        let original = try Data(contentsOf: source)
+        let resolver = StubResolver(.replace)
+        let engine = runEngine(mode, [source], to: destination, clones: clones, resolver: resolver)
+        removeTrashed(by: engine)
+        let what = "\(mode) clones=\(clones) to \(destination.path): asked \(resolver.asked), errors \(engine.errors), "
+            + "trashed \(engine.replaced.map { $0.trashed.path }), created \(engine.created.map { $0.lastPathComponent }), "
+            + "source exists \(FileManager.default.fileExists(atPath: source.path))"
+        XCTAssertEqual(resolver.asked, 0, what, file: file, line: line)
+        XCTAssertTrue(engine.errors.isEmpty, what, file: file, line: line)
+        XCTAssertTrue(engine.replaced.isEmpty, what, file: file, line: line)
+        XCTAssertEqual(try? Data(contentsOf: source), original, what, file: file, line: line)
+        if mode == .move {
+            XCTAssertTrue(engine.moved.isEmpty, what, file: file, line: line)
+        } else {
+            XCTAssertEqual(engine.created.map { $0.lastPathComponent }, ["\(token) copy.txt"], what, file: file, line: line)
+            XCTAssertEqual(try? Data(contentsOf: root.appendingPathComponent("real/\(token) copy.txt")), original, what,
+                           file: file, line: line)
+        }
+    }
+
+    func testCopyAndMoveIntoSymlinkToOwnFolderKeepSource() throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("real"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("link").path, withDestinationPath: "real")
+        let link = root.appendingPathComponent("link")
+        try assertSelfDestinationIsSafe(.copy, to: link, clones: true)
+        try assertSelfDestinationIsSafe(.copy, to: link, clones: false)
+        try assertSelfDestinationIsSafe(.move, to: link, clones: true)
+    }
+
+    func testCopyAndMoveIntoCaseVariantOfOwnFolderKeepSource() throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("real"), withIntermediateDirectories: true)
+        let upper = root.appendingPathComponent("REAL")
+        guard FileManager.default.fileExists(atPath: upper.path) else { throw XCTSkip("temp volume is case-sensitive") }
+        try assertSelfDestinationIsSafe(.copy, to: upper, clones: true)
+        try assertSelfDestinationIsSafe(.copy, to: upper, clones: false)
+        try assertSelfDestinationIsSafe(.move, to: upper, clones: true)
+    }
+
+    func testCopyAndMoveIntoPrivateAliasOfOwnFolderKeepSource() throws {
+        guard root.path.hasPrefix("/var/") else { throw XCTSkip("temp folder is not under /var") }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("real"), withIntermediateDirectories: true)
+        let alias = URL(fileURLWithPath: "/private" + root.appendingPathComponent("real").path)
+        try assertSelfDestinationIsSafe(.copy, to: alias, clones: true)
+        try assertSelfDestinationIsSafe(.copy, to: alias, clones: false)
+        try assertSelfDestinationIsSafe(.move, to: alias, clones: true)
+    }
+
+    /// `root` as reached through the Data-volume firmlink (/System/Volumes/Data/private/var/...), or nil if
+    /// that path doesn't exist or isn't the same folder.
+    private func firmlinkRoot() -> URL? {
+        guard let resolved = realpath(root.path, nil) else { return nil }
+        let path = "/System/Volumes/Data" + String(cString: resolved)
+        free(resolved)
+        var a = stat(), b = stat()
+        guard stat(root.path, &a) == 0, stat(path, &b) == 0, a.st_dev == b.st_dev, a.st_ino == b.st_ino else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    func testCopyAndMoveIntoFirmlinkPathOfOwnFolderKeepSource() throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("real"), withIntermediateDirectories: true)
+        guard let firm = firmlinkRoot() else { throw XCTSkip("no /System/Volumes/Data path to the temp folder") }
+        let alias = firm.appendingPathComponent("real")
+        try assertSelfDestinationIsSafe(.copy, to: alias, clones: true)
+        try assertSelfDestinationIsSafe(.copy, to: alias, clones: false)
+        try assertSelfDestinationIsSafe(.move, to: alias, clones: true)
+    }
+
+    /// Runs the engine on a background thread and cancels it if it copies more than `maxItems` files or runs
+    /// past `timeout`, so a copy into its own subtree can't run away and fill the disk.
+    private func runEngineGuarded(_ mode: CopyEngine.Mode, _ sources: [URL], to destination: URL, clones: Bool,
+                                  maxItems: Int = 200, timeout: TimeInterval = 10) -> (engine: CopyEngine, runaway: Bool) {
+        let operation = FileOperation(kind: mode == .move ? .move : .copy, sources: sources, destination: destination)
+        let engine = CopyEngine(operation: operation, mode: mode)
+        engine.useClones = clones
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { engine.run(); done.signal() }
+        let deadline = Date().addingTimeInterval(timeout)
+        var runaway = false
+        while done.wait(timeout: .now() + 0.01) == .timedOut {
+            if !runaway && (operation.snapshot.completedItems > maxItems || Date() > deadline) {
+                runaway = true
+                operation.cancel()
+            }
+        }
+        return (engine, runaway)
+    }
+
+    /// In a fresh `base`, copies or moves the folder `real` into `target(base)`, another path for `real` or a
+    /// folder inside it. It must be refused like a plain "into itself" drop: one error, nothing created,
+    /// source untouched.
+    private func assertIntoItselfIsRefused(_ mode: CopyEngine.Mode, clones: Bool, base: String,
+                                           to target: (URL) -> URL, file: StaticString = #filePath, line: UInt = #line) throws {
+        let dir = root.appendingPathComponent(base)
+        try makeFile("\(base)/real/a.txt", size: 10)
+        try makeFile("\(base)/real/sub/b.txt", size: 10)
+        try FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("lnk").path, withDestinationPath: "real")
+        let destination = target(dir)
+        let real = dir.appendingPathComponent("real")
+        let (engine, runaway) = runEngineGuarded(mode, [real], to: destination, clones: clones)
+        var items = 0, deepest = 0
+        for case let url as URL in FileManager.default.enumerator(at: real, includingPropertiesForKeys: nil) ?? .init() {
+            items += 1
+            deepest = max(deepest, url.path.count)
+        }
+        let what = "\(mode) clones=\(clones) to \(destination.path): runaway \(runaway), errors \(engine.errors.count) "
+            + "\(engine.errors.prefix(2)), created \(engine.created.map { $0.path }), items under real \(items), "
+            + "deepest path \(deepest) chars, files copied \(engine.operation.snapshot.completedItems)"
+        XCTAssertFalse(runaway, what, file: file, line: line)
+        XCTAssertEqual(engine.errors.count, 1, what, file: file, line: line)
+        XCTAssertTrue(engine.errors.first?.contains("into itself") == true, what, file: file, line: line)
+        XCTAssertTrue(engine.created.isEmpty, what, file: file, line: line)
+        XCTAssertEqual(items, 3, what, file: file, line: line) // a.txt, sub, sub/b.txt
+    }
+
+    func testCopyAndMoveFolderIntoAliasOfItselfAreRefused() throws {
+        // Unfixed code nests copies until PATH_MAX, deeper than FileManager can remove.
+        let tree = root!
+        addTeardownBlock {
+            let rm = Process()
+            rm.executableURL = URL(fileURLWithPath: "/bin/rm")
+            rm.arguments = ["-rf", tree.path]
+            try? rm.run()
+            rm.waitUntilExit()
+        }
+        var targets: [(String, (URL) -> URL)] = [("self", { $0.appendingPathComponent("lnk") }),
+                                                 ("sub", { $0.appendingPathComponent("lnk/sub") })]
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("probe"), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: root.appendingPathComponent("PROBE").path) {
+            targets.append(("case", { $0.appendingPathComponent("REAL/sub") }))
+        }
+        if root.path.hasPrefix("/var/") {
+            targets.append(("private", { URL(fileURLWithPath: "/private" + $0.appendingPathComponent("real/sub").path) }))
+        }
+        if let firm = firmlinkRoot() {
+            let firmPath = firm.path, rootPath = root.path
+            targets.append(("firmlink", { URL(fileURLWithPath: firmPath + $0.path.dropFirst(rootPath.count) + "/real/sub") }))
+        } else {
+            print("firmlink target skipped: no /System/Volumes/Data path to the temp folder")
+        }
+        for (name, target) in targets {
+            try assertIntoItselfIsRefused(.copy, clones: true, base: "\(name)-clone", to: target)
+            try assertIntoItselfIsRefused(.copy, clones: false, base: "\(name)-copy", to: target)
+            try assertIntoItselfIsRefused(.move, clones: true, base: "\(name)-move", to: target)
+        }
+    }
+
+    /// A hard-linked twin in another folder is a real conflict: replacing it must keep the data.
+    func testReplacingHardLinkTwinInAnotherFolderKeepsData() throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("b"), withIntermediateDirectories: true)
+        for mode in [CopyEngine.Mode.copy, .move] {
+            let token = trashToken()
+            let source = try makeFile("a/\(token).txt", size: 10, byte: 3)
+            let original = try Data(contentsOf: source)
+            let twin = root.appendingPathComponent("b/\(token).txt")
+            try FileManager.default.linkItem(at: source, to: twin)
+            let resolver = StubResolver(.replace)
+            let engine = runEngine(mode, [source], to: root.appendingPathComponent("b"), clones: true, resolver: resolver)
+            removeTrashed(by: engine)
+            XCTAssertEqual(resolver.asked, 1, "\(mode)")
+            XCTAssertTrue(engine.errors.isEmpty, "\(mode) \(engine.errors)")
+            XCTAssertEqual(try? Data(contentsOf: twin), original, "\(mode)")
+            if mode == .copy {
+                XCTAssertEqual(try? Data(contentsOf: source), original)
+                var a = stat(), b = stat()
+                XCTAssertTrue(lstat(source.path, &a) == 0 && lstat(twin.path, &b) == 0)
+                XCTAssertNotEqual(a.st_ino, b.st_ino, "copy must be a separate file")
+            } else {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+            }
+        }
+    }
 }

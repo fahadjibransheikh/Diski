@@ -121,7 +121,7 @@ final class CopyEngine {
             destDir = DirectoryReader.normalized(operation.destination?.path ?? srcParent)
         }
 
-        if isDirectory && (destDir == srcPath || destDir.hasPrefix(srcPath + "/")) {
+        if isDirectory && (destDir == srcPath || destDir.hasPrefix(srcPath + "/") || isInside(destDir, folder: st)) {
             recordError("“\(name)” can’t be \(mode == .move ? "moved" : "copied") into itself.")
             finishTopLevelItem()
             return
@@ -129,9 +129,12 @@ final class CopyEngine {
 
         var dstPath = join(destDir, name)
         let isPackageOrFile = !isDirectory || FileKinds.isPackage(name: name, finderFlags: 0)
-        if mode == .duplicate || (mode == .copy && srcParent == destDir) {
+        // The destination can name the source's own folder by another path (symlink, case variant, /private);
+        // it must not look like a conflict, or Replace would trash the source itself.
+        let sameFolder = srcParent == destDir || isSameDirectory(srcParent, destDir)
+        if mode == .duplicate || (mode == .copy && sameFolder) {
             dstPath = join(destDir, Self.uniqueName(for: name, in: destDir, style: .copy, splitExtension: isPackageOrFile))
-        } else if mode == .move && srcParent == destDir {
+        } else if mode == .move && sameFolder {
             finishTopLevelItem()
             return
         }
@@ -558,6 +561,26 @@ final class CopyEngine {
     private func deviceID(_ path: String) -> dev_t {
         var st = stat()
         return stat(path, &st) == 0 ? st.st_dev : -1
+    }
+
+    /// Same folder on disk: equal (device, inode) is one folder, whatever path names it.
+    private func isSameDirectory(_ a: String, _ b: String) -> Bool {
+        var sa = stat(), sb = stat()
+        return stat(a, &sa) == 0 && stat(b, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
+    }
+
+    /// `dir` is `folder` or inside it on disk, whatever paths name them (symlink, case variant, /private, firmlink).
+    /// realpath alone isn't enough: it keeps firmlink twins like /System/Volumes/Data/Users and /Users apart.
+    private func isInside(_ dir: String, folder: stat) -> Bool {
+        guard let resolved = realpath(dir, nil) else { return false }
+        var path = String(cString: resolved)
+        free(resolved)
+        while true {
+            var st = stat()
+            if stat(path, &st) == 0 && st.st_dev == folder.st_dev && st.st_ino == folder.st_ino { return true }
+            if path == "/" { return false }
+            path = (path as NSString).deletingLastPathComponent
+        }
     }
 
     enum NameStyle { case copy, number }
