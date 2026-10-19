@@ -67,17 +67,21 @@ final class Updater {
                 }
                 let bundleURL = Bundle.main.bundleURL
                 let path = bundleURL.path
-                let installable = await Task.detached(priority: .utility) {
-                    !path.contains("/AppTranslocation/") && !path.contains("/DerivedData/")
+                let (installable, team) = await Task.detached(priority: .utility) { () -> (Bool, String?) in
+                    let team = Self.teamIdentifier(of: bundleURL)
+                    // Without a team ID there is nothing to pin the update's signer to.
+                    let ok = team != nil
+                        && !path.contains("/AppTranslocation/") && !path.contains("/DerivedData/")
                         && !path.contains("/Build/Products/")
                         && FileManager.default.isWritableFile(atPath: bundleURL.deletingLastPathComponent().path)
+                    return (ok, team)
                 }.value
-                guard installable else {
+                guard installable, let team else {
                     if !userInitiated && announcedVersions.contains(version) { return }
                     announcedVersions.insert(version)
                     let alert = NSAlert()
                     alert.messageText = "Diski \(version) is available"
-                    alert.informativeText = "Diski can only update itself from a folder it can write to, such as Applications. Download the release and move Diski there to enable in-app updates."
+                    alert.informativeText = "Diski can only update itself when it is signed by its developer and sits in a folder it can write to, such as Applications. Download the release and move Diski there to enable in-app updates."
                     alert.addButton(withTitle: "Download")
                     alert.addButton(withTitle: "Later")
                     if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(release.html_url) }
@@ -94,7 +98,6 @@ final class Updater {
                 let identifier = Bundle.main.bundleIdentifier
                 let app = try await Task.detached(priority: .userInitiated) {
                     try FileManager.default.moveItem(at: download, to: archive)
-                    let team = Self.teamIdentifier(of: bundleURL)
                     return try Self.prepareApp(archive: archive, directory: directory, checksum: checksum,
                                                identifier: identifier, team: team, version: version)
                 }.value
@@ -187,7 +190,7 @@ final class Updater {
         }
     }
 
-    nonisolated private static func components(_ version: String) throws -> [Int] {
+    nonisolated static func components(_ version: String) throws -> [Int] {
         let stripped = version.hasPrefix("v") ? String(version.dropFirst()) : version
         guard let base = stripped.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).first,
               !base.isEmpty else { throw UpdateError("The release version is invalid.") }
@@ -199,7 +202,7 @@ final class Updater {
         }
     }
 
-    nonisolated private static func compareVersions(_ left: String, _ right: String) throws -> Int {
+    nonisolated static func compareVersions(_ left: String, _ right: String) throws -> Int {
         let lhs = try components(left)
         let rhs = try components(right)
         for index in 0..<max(lhs.count, rhs.count) {
@@ -210,15 +213,18 @@ final class Updater {
         return 0
     }
 
-    nonisolated private static func checksum(in body: String) throws -> String? {
+    nonisolated static func checksum(in body: String) throws -> String? {
         let regex = try NSRegularExpression(pattern: "SHA-256:\\s*`([0-9a-fA-F]{64})`")
         guard let match = regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)),
               let range = Range(match.range(at: 1), in: body) else { return nil }
         return String(body[range]).lowercased()
     }
 
+    nonisolated private static let validityFlags = SecCSFlags(
+        rawValue: UInt32(kSecCSStrictValidate | kSecCSCheckNestedCode | kSecCSCheckAllArchitectures))
+
     nonisolated private static func prepareApp(archive: URL, directory: URL, checksum: String,
-                                               identifier: String?, team: String?, version: String) throws -> URL {
+                                               identifier: String?, team: String, version: String) throws -> URL {
         let handle = try FileHandle(forReadingFrom: archive)
         defer { try? handle.close() }
         var hash = SHA256()
@@ -241,13 +247,13 @@ final class Updater {
         _ = try run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app.path])
         // A Developer ID build only accepts updates signed by the same team.
         var requirement: SecRequirement?
-        if let team, SecRequirementCreateWithString(
+        if SecRequirementCreateWithString(
             "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\"" as CFString, [], &requirement) != errSecSuccess {
             throw UpdateError("The update's signing requirement could not be created.")
         }
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(app as CFURL, [], &code) == errSecSuccess,
-              let code, SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess else {
+              let code, SecStaticCodeCheckValidity(code, Self.validityFlags, requirement) == errSecSuccess else {
             throw UpdateError("The update's code signature is invalid or from another developer.")
         }
         return app
