@@ -46,10 +46,6 @@ final class ThumbnailCache {
         return nil
     }
 
-    func hasFailed(_ item: FileItem, points: CGFloat, iconMode: Bool = false) -> Bool {
-        failed.object(forKey: key(for: item, bucket: Self.bucket(for: points), iconMode: iconMode) as NSString) != nil
-    }
-
     /// Requests a thumbnail. Returns a token for `cancel(_:)`. `completion` runs on the main thread.
     /// `iconMode` asks for Finder's decorated style (rounded, inset and softly shadowed;
     /// music tiles for audio), as its list, column and icon views show thumbnails.
@@ -127,10 +123,5 @@ final class ThumbnailCache {
         if let request = requests.removeValue(forKey: key) {
             QLThumbnailGenerator.shared.cancel(request)
         }
-    }
-
-    func invalidate(path: String) {
-        // NSCache does not enumerate keys; discard bounded negative results on invalidation.
-        failed.removeAllObjects()
     }
 }

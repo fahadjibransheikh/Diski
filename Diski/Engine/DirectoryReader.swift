@@ -113,7 +113,6 @@ enum DirectoryReader {
 
         var isDirectory: Bool { objectType == DirectoryReader.vDIR }
         var isSymlink: Bool { objectType == DirectoryReader.vLNK }
-        var isRegularFile: Bool { objectType == DirectoryReader.vREG }
         var nameString: String { String(cString: name) }
     }
 

@@ -12,11 +12,6 @@ struct VolumeInfo: Hashable {
     let isLocal: Bool
     let totalCapacity: Int64
     let availableCapacity: Int64
-
-    var usedFraction: Double {
-        guard totalCapacity > 0 else { return 0 }
-        return 1 - Double(availableCapacity) / Double(totalCapacity)
-    }
 }
 
 /// Mounted volumes, kept current through workspace mount notifications.

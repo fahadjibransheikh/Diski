@@ -22,7 +22,6 @@ enum FileKinds {
     private struct Traits: OptionSet {
         let rawValue: UInt8
         static let image = Traits(rawValue: 1)
-        static let audiovisual = Traits(rawValue: 2)
         static let thumbnail = Traits(rawValue: 4)
     }
 
@@ -114,9 +113,6 @@ enum FileKinds {
         if item.type == .file { _ = traits(of: item) }
     }
 
-    static func isImage(_ item: FileItem) -> Bool { item.type == .file && traits(of: item).contains(.image) }
-    static func isMovie(_ item: FileItem) -> Bool { item.type == .file && traits(of: item).contains(.audiovisual) }
-
     /// Items worth asking Quick Look for a real thumbnail.
     static func wantsThumbnail(_ item: FileItem) -> Bool {
         item.type == .file && item.size > 0 && traits(of: item).contains(.thumbnail)
@@ -139,7 +135,6 @@ enum FileKinds {
         let t = type(for: item)
         var traits: Traits = []
         if t.conforms(to: .image) { traits.insert(.image) }
-        if t.conforms(to: .audiovisualContent) { traits.insert(.audiovisual) }
         if traits.contains(.image) || t.conforms(to: .movie) || t.conforms(to: .pdf)
             || t.conforms(to: .presentation) || t.conforms(to: .spreadsheet)
             || t.identifier == "com.apple.iwork.pages.sffpages" || t.conforms(to: .threeDContent)

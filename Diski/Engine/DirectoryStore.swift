@@ -44,10 +44,6 @@ final class DirectoryStore {
         fileprivate var lastUpdateCost: TimeInterval = 0
 
         init(path: String) { self.path = path }
-
-        func item(named name: String) -> FileItem? {
-            items.first { $0.name == name }
-        }
     }
 
     private var listings: [String: Listing] = [:]

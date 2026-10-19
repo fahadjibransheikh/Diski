@@ -36,14 +36,6 @@ final class DirectoryWatcher {
         if let old { queue.async { DirectoryWatcher.release(old) } }
     }
 
-    func stop() {
-        lock.lock()
-        watched = []
-        lock.unlock()
-        if let stream { DirectoryWatcher.release(stream) }
-        stream = nil
-    }
-
     private func makeStream(for paths: Set<String>) -> FSEventStreamRef? {
         var context = FSEventStreamContext(version: 0,
                                            info: Unmanaged.passUnretained(self).toOpaque(),
