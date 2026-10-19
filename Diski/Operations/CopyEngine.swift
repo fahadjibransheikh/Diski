@@ -34,9 +34,11 @@ final class CopyEngine {
     private(set) var moved: [(from: URL, to: URL)] = []
     private(set) var replaced: [(original: URL, trashed: URL)] = []
     private(set) var errors: [String] = []
+    /// Entries undo may trash: only what this run created.
+    private(set) var undoCreated: [URL] = []
 
     private var rememberedResolution: ConflictResolution?
-    private let errorLock = NSLock()
+    private let stateLock = NSLock()
 
     init(operation: FileOperation, mode: Mode) {
         self.operation = operation
@@ -58,9 +60,15 @@ final class CopyEngine {
     }
 
     private func recordError(_ message: String) {
-        errorLock.lock()
+        stateLock.lock()
         if errors.count < 50 { errors.append(message) }
-        errorLock.unlock()
+        stateLock.unlock()
+    }
+
+    private func recordUndoCreated(_ path: String) {
+        stateLock.lock()
+        undoCreated.append(URL(fileURLWithPath: path))
+        stateLock.unlock()
     }
 
     // MARK: - Top-level items
@@ -148,6 +156,7 @@ final class CopyEngine {
             if renamex_np(srcPath, dstPath, Self.renameExcl) == 0 {
                 moved.append((URL(fileURLWithPath: srcPath), URL(fileURLWithPath: dstPath)))
                 created.append(URL(fileURLWithPath: dstPath))
+                undoCreated.append(URL(fileURLWithPath: dstPath))
                 finishTopLevelItem()
                 return
             }
@@ -162,6 +171,7 @@ final class CopyEngine {
         if mode != .move && sameDevice && useClones && !merge {
             if clonefile(srcPath, dstPath, Self.cloneNoFollow) == 0 {
                 created.append(URL(fileURLWithPath: dstPath))
+                undoCreated.append(URL(fileURLWithPath: dstPath))
                 finishTopLevelItem()
                 return
             }
@@ -182,10 +192,12 @@ final class CopyEngine {
 
         if ok && !operation.isCancelled {
             created.append(URL(fileURLWithPath: dstPath))
+            // A merge reuses the existing folder: undo must not trash or move it back (only the entries recorded in copyTree).
+            if !merge { undoCreated.append(URL(fileURLWithPath: dstPath)) }
             if mode == .move {
                 do {
                     try FileManager.default.removeItem(atPath: srcPath)
-                    moved.append((URL(fileURLWithPath: srcPath), URL(fileURLWithPath: dstPath)))
+                    if !merge { moved.append((URL(fileURLWithPath: srcPath), URL(fileURLWithPath: dstPath))) }
                 } catch {
                     recordError("“\(name)” was copied but the original couldn’t be removed: \(error.localizedDescription)")
                 }
@@ -298,7 +310,7 @@ final class CopyEngine {
 
     private enum Task {
         case directory(src: String, dst: String, exists: Bool)
-        case file(src: String, dst: String, size: Int64, symlink: Bool)
+        case file(src: String, dst: String, size: Int64, symlink: Bool, merging: Bool)
     }
 
     /// Work queue shared by the copy workers. Folder tasks are served first so
@@ -389,9 +401,12 @@ final class CopyEngine {
                     if !copyDirectoryEntries(src: s, dst: d, exists: exists, queue: queue, buffer: buffer) {
                         queue.condition.lock(); queue.failed = true; queue.condition.unlock()
                     }
-                case let .file(s, d, size, symlink):
+                case let .file(s, d, size, symlink, merging):
                     operation.update { $0.currentName = (s as NSString).lastPathComponent }
-                    if !copyFile(from: s, to: d, size: size, isSymlink: symlink, sameDevice: sameDevice) {
+                    if copyFile(from: s, to: d, size: size, isSymlink: symlink, sameDevice: sameDevice) {
+                        // Files inside a folder this run created are covered by that folder.
+                        if merging { recordUndoCreated(d) }
+                    } else {
                         queue.condition.lock(); queue.failed = true; queue.condition.unlock()
                     }
                     operation.update { $0.completedItems += 1 }
@@ -450,6 +465,7 @@ final class CopyEngine {
                         ok = false
                         return
                     }
+                    if exists && !dstExists { recordUndoCreated(d) }
                     pendingTasks.append(.directory(src: s, dst: d, exists: dstExists))
                 } else {
                     if exists {
@@ -466,7 +482,7 @@ final class CopyEngine {
                     }
                     discoveredBytes += entry.size
                     discoveredFiles += 1
-                    pendingTasks.append(.file(src: s, dst: d, size: entry.size, symlink: entry.isSymlink))
+                    pendingTasks.append(.file(src: s, dst: d, size: entry.size, symlink: entry.isSymlink, merging: exists))
                 }
                 if pendingTasks.count >= 256 {
                     queue.push(contentsOf: pendingTasks)

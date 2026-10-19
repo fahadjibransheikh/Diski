@@ -57,13 +57,14 @@ final class FileOperationManager: NSObject, ConflictResolving {
         workQueue.async {
             engine.run()
             let created = engine.created
+            let undoCreated = engine.undoCreated
             let moved = engine.moved
             let replaced = engine.replaced
             let errors = engine.errors
             DispatchQueue.main.async {
                 operation.replacedItems = replaced
                 self.finish(operation, results: created, errors: errors)
-                self.registerUndo(for: operation, moved: moved)
+                self.registerUndo(for: operation, created: undoCreated, moved: moved, replaced: replaced)
             }
         }
         return operation
@@ -525,17 +526,18 @@ final class FileOperationManager: NSObject, ConflictResolving {
         }
     }
 
-    private func registerUndo(for operation: FileOperation, moved: [(from: URL, to: URL)]) {
-        guard operation.state != .cancelled else { return }
+    /// `created`/`moved`/`replaced` only ever hold completed items, so this is also right for a cancelled operation.
+    /// Not `private`: tests call it. A merged move registers no undo (its `moved` is empty by design).
+    func registerUndo(for operation: FileOperation, created: [URL], moved: [(from: URL, to: URL)],
+                      replaced: [(original: URL, trashed: URL)]) {
         switch operation.kind {
         case .copy, .duplicate:
-            let created = operation.resultURLs
-            guard !created.isEmpty else { return }
-            undoManager.registerUndo(withTarget: self) { manager in manager.trashNow(created) }
+            guard !created.isEmpty || !replaced.isEmpty else { return }
+            undoManager.registerUndo(withTarget: self) { m in m.trashNow(created) }
             undoManager.setActionName(operation.kind == .copy ? "Copy" : "Duplicate")
         case .move:
             guard !moved.isEmpty else { return }
-            undoManager.registerUndo(withTarget: self) { manager in manager.moveBackNow(moved) }
+            undoManager.registerUndo(withTarget: self) { m in m.moveBackNow(moved) }
             undoManager.setActionName("Move")
         default:
             break
@@ -600,11 +602,14 @@ final class TrashLedger {
     private let saveQueue = DispatchQueue(label: "app.diski.trashledger", qos: .utility)
 
     private init() {
+        // Tests must not write the real ledger (or race a running Diski over it); one file per test process.
+        let underTest = NSClassFromString("XCTestCase") != nil
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        let folder = support.appendingPathComponent("Diski", isDirectory: true)
+        let folder = underTest ? FileManager.default.temporaryDirectory : support.appendingPathComponent("Diski", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        fileURL = folder.appendingPathComponent("TrashLedger.json")
+        fileURL = folder.appendingPathComponent(underTest ? "DiskiTests-TrashLedger-\(ProcessInfo.processInfo.processIdentifier).json"
+                                                          : "TrashLedger.json")
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
             entries = decoded

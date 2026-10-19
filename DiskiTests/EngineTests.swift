@@ -3,19 +3,29 @@ import XCTest
 
 final class EngineTests: XCTestCase {
     private var root: URL!
+    /// Unique per test; every file that can reach the real Trash carries it so tearDown can find and remove it.
+    private var tok = ""
+    private var createdNames = Set<String>()
 
     override func setUpWithError() throws {
+        tok = UUID().uuidString
         root = FileManager.default.temporaryDirectory.appendingPathComponent("DiskiTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: root)
+        // Undo/replace tests trash into the real ~/.Trash. The test host can't list it (TCC), so remove by exact name:
+        // every name a test created carries `tok`, and a trashed item keeps its name (the token rules out collisions).
+        for name in createdNames where name.contains(tok) {
+            try? FileManager.default.removeItem(at: FileOperationManager.trashURL.appendingPathComponent(name))
+        }
     }
 
     @discardableResult
     private func makeFile(_ relative: String, size: Int = 0, byte: UInt8 = 0x41) throws -> URL {
         let url = root.appendingPathComponent(relative)
+        createdNames.formUnion(relative.split(separator: "/").map(String.init))
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         var bytes = [UInt8](repeating: 0, count: size)
         for i in 0..<size { bytes[i] = byte &+ UInt8(truncatingIfNeeded: i % 251) }
@@ -340,5 +350,79 @@ final class EngineTests: XCTestCase {
         print(String(format: "DISKI-BENCH listing 3000 files: Diski %.2f ms, FileManager %.2f ms (%.1fx)",
                      diski * 1000, foundation * 1000, foundation / diski))
         XCTAssertLessThan(diski, foundation)
+    }
+
+    // MARK: PR-A undo safety
+
+    /// Registers the engine's undo the way `runCopyEngine` does, on a private manager (own UndoManager).
+    private func registerUndo(_ engine: CopyEngine) -> FileOperationManager {
+        let manager = FileOperationManager()
+        manager.undoManager.groupsByEvent = false
+        manager.undoManager.beginUndoGrouping()
+        manager.registerUndo(for: engine.operation, created: engine.undoCreated, moved: engine.moved, replaced: engine.replaced)
+        manager.undoManager.endUndoGrouping()
+        return manager
+    }
+
+    private func fileSize(_ url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int
+    }
+
+    func testUndoOfMergeCopyKeepsPreexistingFiles() throws {
+        let p = "Photos-\(tok)"
+        try makeFile("src/\(p)/a-\(tok)", size: 10)
+        try makeFile("src/\(p)/b-\(tok)", size: 10)
+        try makeFile("src/\(p)/sub/s-\(tok)", size: 10)
+        try makeFile("src/\(p)/fresh-\(tok)/x-\(tok)", size: 10)
+        try makeFile("dst/\(p)/c-\(tok)", size: 10)
+        try makeFile("dst/\(p)/sub/old-\(tok)", size: 10)
+        let dst = root.appendingPathComponent("dst/\(p)")
+        let engine = runEngine(.copy, [root.appendingPathComponent("src/\(p)")], to: root.appendingPathComponent("dst"),
+                               clones: false, resolver: StubResolver(.merge))
+        XCTAssertTrue(engine.errors.isEmpty, "\(engine.errors)")
+        XCTAssertEqual(Set(engine.undoCreated.map { $0.path }),
+                       Set(["a-\(tok)", "b-\(tok)", "sub/s-\(tok)", "fresh-\(tok)"].map { dst.appendingPathComponent($0).path }))
+
+        let manager = registerUndo(engine)
+        XCTAssertTrue(manager.undoManager.canUndo)
+        manager.undoManager.undo()
+        let fm = FileManager.default
+        XCTAssertTrue(fm.fileExists(atPath: dst.appendingPathComponent("c-\(tok)").path))
+        XCTAssertTrue(fm.fileExists(atPath: dst.appendingPathComponent("sub/old-\(tok)").path))
+        XCTAssertTrue(fm.fileExists(atPath: dst.path))
+        XCTAssertFalse(fm.fileExists(atPath: dst.appendingPathComponent("a-\(tok)").path))
+        XCTAssertFalse(fm.fileExists(atPath: dst.appendingPathComponent("sub/s-\(tok)").path))
+        XCTAssertFalse(fm.fileExists(atPath: dst.appendingPathComponent("fresh-\(tok)").path))
+    }
+
+    func testMergedMoveRegistersNoUndo() throws {
+        let p = "Photos-\(tok)"
+        try makeFile("src/\(p)/a-\(tok).jpg", size: 10)
+        try makeFile("dst/\(p)/c-\(tok).jpg", size: 10)
+        let engine = runEngine(.move, [root.appendingPathComponent("src/\(p)")], to: root.appendingPathComponent("dst"),
+                               clones: false, resolver: StubResolver(.merge))
+        XCTAssertTrue(engine.errors.isEmpty, "\(engine.errors)")
+        XCTAssertTrue(engine.moved.isEmpty)
+        let manager = registerUndo(engine)
+        // An empty undo group still reports canUndo == true, so check that no action (and no action name) was registered.
+        XCTAssertEqual(manager.undoManager.undoActionName, "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("dst/\(p)/c-\(tok).jpg").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("dst/\(p)/a-\(tok).jpg").path))
+    }
+
+    func testCancelledCopyStillRegistersUndoForCompletedItems() throws {
+        let a = try makeFile("in/a-\(tok).txt", size: 10)
+        let b = try makeFile("in/b-\(tok).txt", size: 10)
+        let out = root.appendingPathComponent("out")
+        try makeFile("out/b-\(tok).txt", size: 20) // conflict on the second item -> Stop
+        let engine = runEngine(.copy, [a, b], to: out, clones: false, resolver: StubResolver(.stop))
+        XCTAssertEqual(engine.created.map { $0.lastPathComponent }, ["a-\(tok).txt"])
+        engine.operation.state = .cancelled
+
+        let manager = registerUndo(engine)
+        XCTAssertTrue(manager.undoManager.canUndo)
+        manager.undoManager.undo()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("a-\(tok).txt").path))
+        XCTAssertEqual(fileSize(out.appendingPathComponent("b-\(tok).txt")), 20)
     }
 }
