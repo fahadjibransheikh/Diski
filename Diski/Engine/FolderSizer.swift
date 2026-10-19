@@ -43,6 +43,8 @@ final class FolderSizer {
     /// When the last walk of a slow folder ended and how long it took.
     private var lastWalks: [String: (end: Date, duration: TimeInterval)] = [:]
     private let maxAge: TimeInterval = 180
+    /// Bounds `cache`, `walked` and `lastWalks`, which otherwise grow with every folder ever walked.
+    var maxCached = 20_000
 
     private init() {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
@@ -191,13 +193,16 @@ final class FolderSizer {
         }
         // Only slow folders are remembered (and so ever deferred).
         if duration >= 0.01 {
+            if lastWalks.count >= maxCached { lastWalks.removeAll(keepingCapacity: true) }
             lastWalks[path] = (end: Date(), duration: duration)
         } else {
             lastWalks.removeValue(forKey: path)
         }
         let result = Result(bytes: bytes, items: items, computedAt: Date())
         // A walk that raced with changes is still worth showing, but not caching.
+        if cache.count >= maxCached { cache.removeAll(keepingCapacity: true) }
         if !walk.isStale { cache[path] = result }
+        if walked.count >= maxCached { walked.removeAll(keepingCapacity: true) }
         walked.insert(path)
         remember(path, bytes: bytes)
         for callback in waiting.removeValue(forKey: path) ?? [] { callback(result) }

@@ -343,6 +343,24 @@ final class EngineTests: XCTestCase {
         XCTAssertFalse(makeItem().update(from: makeItem()))
     }
 
+    func testFolderSizeCacheIsCapped() throws {
+        let sizer = FolderSizer.shared
+        let original = sizer.maxCached
+        sizer.maxCached = 2
+        addTeardownBlock { sizer.maxCached = original }
+        var paths: [String] = []
+        for i in 0..<3 {
+            try makeFile("cap\(i)/f.bin", size: 100)
+            let path = root.appendingPathComponent("cap\(i)").path
+            paths.append(path)
+            let done = expectation(description: "walk \(i)")
+            sizer.size(of: path) { _ in done.fulfill() }
+            wait(for: [done], timeout: 10)
+        }
+        XCTAssertNil(sizer.cached(paths[0]), "the oldest entry survived the cap")
+        XCTAssertNotNil(sizer.cached(paths[2]))
+    }
+
     // MARK: Performance
 
     func testListingSpeedAgainstFileManager() throws {
