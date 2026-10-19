@@ -410,6 +410,50 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("dst/\(p)/a-\(tok).jpg").path))
     }
 
+    func testReplaceKeepsOriginalWhenCopyFails() throws {
+        let name = "doc-\(tok).txt"
+        let source = try makeFile("in/\(name)", size: 10, byte: 1)
+        let existing = try makeFile("out/\(name)", size: 20, byte: 2)
+        let original = try Data(contentsOf: existing)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: source.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path) }
+        let engine = runEngine(.copy, [source], to: root.appendingPathComponent("out"), clones: false, resolver: StubResolver(.replace))
+        XCTAssertEqual(try Data(contentsOf: existing), original)
+        XCTAssertTrue(engine.replaced.isEmpty)
+        XCTAssertFalse(engine.errors.isEmpty)
+    }
+
+    func testMergeKeepsExistingFileWhenReplacementFails() throws {
+        let p = "Photos-\(tok)"
+        let source = try makeFile("src/\(p)/a-\(tok).jpg", size: 10, byte: 1)
+        let existing = try makeFile("dst/\(p)/a-\(tok).jpg", size: 20, byte: 2)
+        let original = try Data(contentsOf: existing)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: source.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path) }
+        let engine = runEngine(.copy, [root.appendingPathComponent("src/\(p)")], to: root.appendingPathComponent("dst"),
+                               clones: false, resolver: StubResolver(.merge))
+        XCTAssertEqual(try Data(contentsOf: existing), original)
+        XCTAssertTrue(engine.replaced.isEmpty)
+        XCTAssertFalse(engine.errors.isEmpty)
+    }
+
+    func testUndoOfReplaceCopyRestoresOriginal() throws {
+        let name = "doc-\(tok).txt"
+        let source = try makeFile("in/\(name)", size: 10, byte: 1)
+        let target = try makeFile("out/\(name)", size: 20, byte: 2)
+        let engine = runEngine(.copy, [source], to: root.appendingPathComponent("out"), clones: false, resolver: StubResolver(.replace))
+        XCTAssertTrue(engine.errors.isEmpty, "\(engine.errors)")
+        XCTAssertEqual(engine.replaced.count, 1)
+        XCTAssertEqual(fileSize(target), 10)
+
+        let manager = registerUndo(engine)
+        manager.undoManager.undo()
+        XCTAssertEqual(fileSize(target), 20)
+        XCTAssertTrue(manager.undoManager.canRedo)
+        manager.undoManager.redo()
+        XCTAssertEqual(fileSize(target), 10)
+    }
+
     func testCancelledCopyStillRegistersUndoForCompletedItems() throws {
         let a = try makeFile("in/a-\(tok).txt", size: 10)
         let b = try makeFile("in/b-\(tok).txt", size: 10)

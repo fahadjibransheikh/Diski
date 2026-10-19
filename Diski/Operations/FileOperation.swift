@@ -65,8 +65,6 @@ final class FileOperation: Identifiable {
     var finishedAt: Date?
     var resultURLs: [URL] = []
     var errors: [String] = []
-    /// Items replaced by this operation (moved to the Trash), for undo.
-    var replacedItems: [(original: URL, trashed: URL)] = []
 
     private let lock = OSAllocatedUnfairLock(uncheckedState: Snapshot())
     private let control = NSCondition()

@@ -62,7 +62,7 @@ final class FileOperationManager: NSObject, ConflictResolving {
             let replaced = engine.replaced
             let errors = engine.errors
             DispatchQueue.main.async {
-                operation.replacedItems = replaced
+                TrashLedger.shared.record(replaced)
                 self.finish(operation, results: created, errors: errors)
                 self.registerUndo(for: operation, created: undoCreated, moved: moved, replaced: replaced)
             }
@@ -533,11 +533,11 @@ final class FileOperationManager: NSObject, ConflictResolving {
         switch operation.kind {
         case .copy, .duplicate:
             guard !created.isEmpty || !replaced.isEmpty else { return }
-            undoManager.registerUndo(withTarget: self) { m in m.trashNow(created) }
+            undoManager.registerUndo(withTarget: self) { m in m.trashNow(created); m.putBackNow(replaced) }
             undoManager.setActionName(operation.kind == .copy ? "Copy" : "Duplicate")
         case .move:
             guard !moved.isEmpty else { return }
-            undoManager.registerUndo(withTarget: self) { m in m.moveBackNow(moved) }
+            undoManager.registerUndo(withTarget: self) { m in m.moveBackNow(moved); m.putBackNow(replaced) }
             undoManager.setActionName("Move")
         default:
             break

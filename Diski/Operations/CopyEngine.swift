@@ -65,6 +65,33 @@ final class CopyEngine {
         stateLock.unlock()
     }
 
+    /// Puts a trashed original back after the copy that replaced it failed or was cancelled.
+    private func restoreReplaced(at path: String) {
+        let url = URL(fileURLWithPath: path)
+        stateLock.lock()
+        let index = replaced.firstIndex { $0.original == url }
+        let entry = index.map { replaced.remove(at: $0) }
+        stateLock.unlock()
+        guard let entry else { return }
+        if renamex_np(entry.trashed.path, path, Self.renameExcl) != 0 {
+            // Keep the entry so the ledger still records it and Put Back can restore it later.
+            stateLock.lock(); replaced.append(entry); stateLock.unlock()
+            recordError("“\(url.lastPathComponent)” couldn’t be put back; it is in the Trash.")
+        }
+    }
+
+    /// Moves an existing file to the Trash so a merge can replace it; recorded so it can be restored or put back.
+    private func trashForReplace(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        var trashed: NSURL?
+        guard (try? FileManager.default.trashItem(at: url, resultingItemURL: &trashed)) != nil, let trashedURL = trashed as URL? else {
+            recordError("“\(url.lastPathComponent)” couldn’t be replaced.")
+            return false
+        }
+        stateLock.lock(); replaced.append((url, trashedURL)); stateLock.unlock()
+        return true
+    }
+
     private func recordUndoCreated(_ path: String) {
         stateLock.lock()
         undoCreated.append(URL(fileURLWithPath: path))
@@ -134,7 +161,9 @@ final class CopyEngine {
                 do {
                     var trashed: NSURL?
                     try FileManager.default.trashItem(at: existingURL, resultingItemURL: &trashed)
-                    if let trashed = trashed as URL? { replaced.append((existingURL, trashed)) }
+                    if let trashed = trashed as URL? {
+                        stateLock.lock(); replaced.append((existingURL, trashed)); stateLock.unlock()
+                    }
                 } catch {
                     recordError("“\(name)” couldn’t be replaced: \(error.localizedDescription)")
                     finishTopLevelItem()
@@ -162,6 +191,7 @@ final class CopyEngine {
             }
             if errno != EXDEV {
                 recordError("“\(name)” couldn’t be moved: \(String(cString: strerror(errno)))")
+                restoreReplaced(at: dstPath)
                 finishTopLevelItem()
                 return
             }
@@ -205,6 +235,7 @@ final class CopyEngine {
         } else if !merge {
             // Never leave a half-copied item behind.
             try? FileManager.default.removeItem(atPath: dstPath)
+            restoreReplaced(at: dstPath)
         }
         finishTopLevelItem()
     }
@@ -403,10 +434,20 @@ final class CopyEngine {
                     }
                 case let .file(s, d, size, symlink, merging):
                     operation.update { $0.currentName = (s as NSString).lastPathComponent }
-                    if copyFile(from: s, to: d, size: size, isSymlink: symlink, sameDevice: sameDevice) {
+                    var existing = stat()
+                    var didReplace = false
+                    var proceed = true
+                    // Merging: a file that already exists is replaced (the old one goes to the Trash).
+                    if merging && lstat(d, &existing) == 0 {
+                        didReplace = trashForReplace(d)
+                        proceed = didReplace
+                        if !proceed { operation.update { $0.completedBytes += size } }
+                    }
+                    if proceed && copyFile(from: s, to: d, size: size, isSymlink: symlink, sameDevice: sameDevice) {
                         // Files inside a folder this run created are covered by that folder.
                         if merging { recordUndoCreated(d) }
                     } else {
+                        if proceed && didReplace { restoreReplaced(at: d) }
                         queue.condition.lock(); queue.failed = true; queue.condition.unlock()
                     }
                     operation.update { $0.completedItems += 1 }
@@ -468,18 +509,6 @@ final class CopyEngine {
                     if exists && !dstExists { recordUndoCreated(d) }
                     pendingTasks.append(.directory(src: s, dst: d, exists: dstExists))
                 } else {
-                    if exists {
-                        // Merging: files that already exist are replaced (the old one goes to the Trash).
-                        var existing = stat()
-                        if lstat(d, &existing) == 0 {
-                            var trashed: NSURL?
-                            if (try? FileManager.default.trashItem(at: URL(fileURLWithPath: d), resultingItemURL: &trashed)) == nil {
-                                recordError("“\(name)” couldn’t be replaced.")
-                                ok = false
-                                return
-                            }
-                        }
-                    }
                     discoveredBytes += entry.size
                     discoveredFiles += 1
                     pendingTasks.append(.file(src: s, dst: d, size: entry.size, symlink: entry.isSymlink, merging: exists))
