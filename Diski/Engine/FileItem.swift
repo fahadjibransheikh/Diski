@@ -157,6 +157,8 @@ final class FileItem: Hashable, CustomStringConvertible {
         let changed = type != other.type || size != other.size || modified != other.modified
             || finderFlags != other.finderFlags || bsdFlags != other.bsdFlags
             || childCount != other.childCount || created != other.created || fileID != other.fileID
+            || mode != other.mode || allocatedSize != other.allocatedSize || added != other.added
+            || isMountPoint != other.isMountPoint || linkTargetIsDirectory != other.linkTargetIsDirectory
         if _sortKey == nil { _sortKey = other._sortKey }
         if _ext == nil { _ext = other._ext }
         type = other.type

@@ -319,6 +319,30 @@ final class EngineTests: XCTestCase {
         XCTAssertNil(sizer.cached(path))
     }
 
+    // MARK: Item updates, caches
+
+    private func makeItem(type: EntryType = .file, size: Int64 = 10, allocatedSize: Int64 = 4096, mode: UInt32 = 0o644,
+                          added: Double = 100, isMountPoint: Bool = false, linkTargetIsDirectory: Bool = false) -> FileItem {
+        FileItem(name: "x", parentPath: "/tmp", type: type, fileID: 1, size: size, allocatedSize: allocatedSize,
+                 created: 1, modified: 2, added: added, finderFlags: 0, bsdFlags: 0, mode: mode, childCount: -1,
+                 isMountPoint: isMountPoint, linkTargetIsDirectory: linkTargetIsDirectory)
+    }
+
+    func testUpdateReportsEveryCopiedField() {
+        // `chmod +x` changes only the mode (and ctime): the Kind column and icon must refresh.
+        let variants: [(String, FileItem)] = [
+            ("mode", makeItem(mode: 0o755)),
+            ("allocatedSize", makeItem(allocatedSize: 8192)),
+            ("added", makeItem(added: 200)),
+            ("isMountPoint", makeItem(isMountPoint: true)),
+            ("linkTargetIsDirectory", makeItem(linkTargetIsDirectory: true)),
+        ]
+        for (field, other) in variants {
+            XCTAssertTrue(makeItem().update(from: other), "a changed \(field) is not reported")
+        }
+        XCTAssertFalse(makeItem().update(from: makeItem()))
+    }
+
     // MARK: Performance
 
     func testListingSpeedAgainstFileManager() throws {
