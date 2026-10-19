@@ -414,4 +414,74 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(bytes, 5100)
         XCTAssertEqual(items, 5, "every link still counts as an item")
     }
+
+    func testSubtreeInvalidationDropsCachedDescendants() throws {
+        try makeFile("tree/child/a.bin", size: 100)
+        try makeFile("tree2/b.bin", size: 100)
+        let sizer = FolderSizer.shared
+        let paths = ["tree", "tree/child", "tree2"].map { root.appendingPathComponent($0).path }
+        for path in paths {
+            let done = expectation(description: path)
+            sizer.size(of: path) { _ in done.fulfill() }
+            wait(for: [done], timeout: 10)
+            XCTAssertNotNil(sizer.cached(path))
+        }
+        sizer.invalidate(subtrees: [paths[0]])
+        XCTAssertNil(sizer.cached(paths[0]))
+        XCTAssertNil(sizer.cached(paths[1]), "a cached descendant survived")
+        XCTAssertNotNil(sizer.cached(paths[2]), "a sibling that only shares the name prefix was dropped")
+        sizer.invalidate(subtrees: ["/"])
+        XCTAssertNil(sizer.cached(paths[2]), "the root `/` did not drop a cached folder")
+    }
+
+    func testRescanFlagsAreRecognized() {
+        let dir = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)
+        for flag in [kFSEventStreamEventFlagMustScanSubDirs, kFSEventStreamEventFlagUserDropped, kFSEventStreamEventFlagKernelDropped] {
+            XCTAssertTrue(DirectoryWatcher.isRescan(FSEventStreamEventFlags(flag)), "flag \(flag)")
+            XCTAssertTrue(DirectoryWatcher.isRescan(FSEventStreamEventFlags(flag) | dir), "flag \(flag) with ItemIsDir")
+        }
+        for flag in [0, kFSEventStreamEventFlagItemIsFile, kFSEventStreamEventFlagItemIsDir, kFSEventStreamEventFlagItemModified] {
+            XCTAssertFalse(DirectoryWatcher.isRescan(FSEventStreamEventFlags(flag)), "flag \(flag)")
+        }
+    }
+
+    func testRescanEventReachesWatcherCallback() throws {
+        let tree = root.appendingPathComponent("tree").path
+        try makeFile("tree/a.bin", size: 10)
+        let watcher = DirectoryWatcher()
+        let delivered = expectation(description: "onChange")
+        var subtrees: [String] = []
+        watcher.onChange = { _, _, roots in subtrees = roots; delivered.fulfill() }
+        // What the FSEvents callback builds from a MustScanSubDirs / dropped-event flag.
+        watcher.handle([(path: tree + "/", isFile: false, rescan: true)])
+        wait(for: [delivered], timeout: 5)
+        XCTAssertEqual(subtrees, [tree], "trailing slash stripped, rescan root reported")
+    }
+
+    func testRescanEventRefreshesWatchedListingsAndSizes() throws {
+        try makeFile("tree/child/grand/f.bin", size: 100)
+        let child = root.appendingPathComponent("tree/child").path
+        let grand = child + "/grand"
+        let store = DirectoryStore.shared, sizer = FolderSizer.shared
+        store.beginWatching(child)
+        addTeardownBlock { store.endWatching(child) }
+        let listing = store.loadNow(child)
+        XCTAssertEqual(listing.items.map(\.name), ["grand"])
+        let sized = expectation(description: "sized")
+        sizer.size(of: grand) { _ in sized.fulfill() }
+        wait(for: [sized], timeout: 10)
+        XCTAssertNotNil(sizer.cached(grand))
+
+        // Nothing on disk changes, so only the rescan can re-read the listing or re-request the size.
+        let readBefore = listing.lastRead
+        let resized = expectation(forNotification: DirectoryStore.folderContentsDidChange, object: store) { note in
+            (note.userInfo?["paths"] as? Set<String>)?.contains(grand) == true
+        }
+        store.watcher.handle([(path: root.appendingPathComponent("tree").path, isFile: false, rescan: true)])
+        wait(for: [resized], timeout: 5)
+        XCTAssertNil(sizer.cached(grand), "a cached size under the rescan root survived")
+        let deadline = Date().addingTimeInterval(5)
+        while listing.lastRead == readBefore && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+        XCTAssertGreaterThan(listing.lastRead, readBefore, "the watched listing under the root was not re-read")
+    }
 }

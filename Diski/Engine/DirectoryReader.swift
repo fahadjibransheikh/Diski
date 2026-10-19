@@ -214,6 +214,11 @@ enum DirectoryReader {
         return path.isEmpty ? "/" : path
     }
 
+    /// Whether `path` is `root` or lies inside it; both normalized.
+    static func isPath(_ path: String, atOrUnder root: String) -> Bool {
+        path == root || path.hasPrefix(root == "/" ? "/" : root + "/")
+    }
+
     private static func parse(entry: UnsafeRawPointer, parentPath: String, detailed: Bool,
                               include: ((UnsafePointer<CChar>, UInt32) -> Bool)?) -> FileItem? {
         var field = entry.advanced(by: MemoryLayout<UInt32>.size) // skip length

@@ -253,6 +253,18 @@ final class FolderSizer {
         }
     }
 
+    /// Drops cached sizes at or under each root and marks their running walks
+    /// stale: after dropped FSEvents nothing inside the root can be trusted.
+    /// The roots' ancestors are handled by `invalidate(changedPaths:)`.
+    func invalidate(subtrees: [String]) {
+        guard !subtrees.isEmpty, !cache.isEmpty || !jobs.isEmpty else { return }
+        let roots = subtrees.map(DirectoryReader.normalized)
+        cache = cache.filter { entry in !roots.contains { DirectoryReader.isPath(entry.key, atOrUnder: $0) } }
+        for (path, walk) in jobs where roots.contains(where: { DirectoryReader.isPath(path, atOrUnder: $0) }) {
+            walk.isStale = true
+        }
+    }
+
     // MARK: - Walk
 
     final class Walk {

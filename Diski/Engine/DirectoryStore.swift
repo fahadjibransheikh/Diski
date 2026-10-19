@@ -48,18 +48,37 @@ final class DirectoryStore {
 
     private var listings: [String: Listing] = [:]
     private var watchCounts: [String: Int] = [:]
-    private let watcher = DirectoryWatcher()
+    let watcher = DirectoryWatcher()
     private var watcherNeedsUpdate = false
     private let readQueue = DispatchQueue(label: "app.diski.read", qos: .userInitiated, attributes: .concurrent)
     private let refreshQueue = DispatchQueue(label: "app.diski.refresh", qos: .utility, attributes: .concurrent)
     private let maxCachedListings = 96
 
     private init() {
-        watcher.onChange = { [weak self] directories, folders in
+        watcher.onChange = { [weak self] directories, folders, subtrees in
             FolderSizer.shared.invalidate(changedPaths: folders)
+            FolderSizer.shared.invalidate(subtrees: subtrees)
             self?.refreshFromWatcher(directories)
             self?.noteNestedChanges(folders, minimumDepth: 0)
+            self?.rescan(subtrees)
         }
+    }
+
+    /// After dropped or coalesced events under `roots`: re-reads every watched
+    /// listing at or under them and re-requests the size of the folders they list.
+    private func rescan(_ roots: [String]) {
+        guard !roots.isEmpty else { return }
+        let paths = Set(watchCounts.keys.filter { path in roots.contains { DirectoryReader.isPath(path, atOrUnder: $0) } })
+        guard !paths.isEmpty else { return }
+        refreshFromWatcher(paths)
+        var folders = Set<String>()
+        for path in paths {
+            for item in listings[path]?.items ?? [] where item.type == .directory || item.type == .package {
+                folders.insert(item.path)
+            }
+        }
+        guard !folders.isEmpty else { return }
+        NotificationCenter.default.post(name: Self.folderContentsDidChange, object: self, userInfo: ["paths": folders])
     }
 
     /// Finds the folders, listed in watched directories, that contain a changed
