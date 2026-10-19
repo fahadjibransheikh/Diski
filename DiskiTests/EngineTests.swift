@@ -361,6 +361,24 @@ final class EngineTests: XCTestCase {
         XCTAssertNotNil(sizer.cached(paths[2]))
     }
 
+    func testThumbnailKeyIncludesScale() throws {
+        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64, bitsPerSample: 8,
+                                                 samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        for x in 0..<64 { for y in 0..<64 { rep.setColor(NSColor(red: CGFloat(x) / 64, green: CGFloat(y) / 64, blue: 0.5, alpha: 1), atX: x, y: y) } }
+        let url = root.appendingPathComponent("pic-\(UUID().uuidString).png")
+        try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: url)
+        let item = try XCTUnwrap(FileItem.make(path: url.path))
+
+        let done = expectation(description: "1x thumbnail delivered")
+        var delivered: NSImage?
+        ThumbnailCache.shared.request(for: item, points: 64, scale: 1) { delivered = $0; done.fulfill() }
+        wait(for: [done], timeout: 10)
+        XCTAssertNotNil(delivered, "Quick Look produced no thumbnail in the test host")
+        XCTAssertNotNil(ThumbnailCache.shared.cached(for: item, points: 64, scale: 1))
+        XCTAssertNil(ThumbnailCache.shared.cached(for: item, points: 64, scale: 2), "a 1x thumbnail served a 2x request")
+    }
+
     // MARK: Performance
 
     func testListingSpeedAgainstFileManager() throws {

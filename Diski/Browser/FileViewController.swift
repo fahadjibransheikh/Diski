@@ -70,7 +70,8 @@ final class ItemImageLoader {
         self.imageView = imageView
         loadedKey = (modified: item.modified, size: item.size, points: points, thumbnails: thumbnails, iconMode: iconMode)
         let wantsThumbnail = thumbnails && FileKinds.wantsThumbnail(item)
-        if wantsThumbnail, let cached = ThumbnailCache.shared.cached(for: item, points: points, iconMode: iconMode) {
+        let scale = imageView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        if wantsThumbnail, let cached = ThumbnailCache.shared.cached(for: item, points: points, scale: scale, iconMode: iconMode) {
             imageView.image = cached
             showsThumbnail = true
             return
@@ -103,7 +104,6 @@ final class ItemImageLoader {
         }
         // request() answers failed keys at once (with nil), so no separate check.
         if wantsThumbnail {
-            let scale = imageView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
             thumbnailToken = ThumbnailCache.shared.request(for: item, points: points, scale: scale,
                                                            iconMode: iconMode) { [weak self, weak imageView] image in
                 guard let self, self.item === item, self.generation == requestGeneration else { return }

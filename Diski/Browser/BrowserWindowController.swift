@@ -688,7 +688,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
                       contentRect: UnsafeMutablePointer<NSRect>!) -> Any! {
         guard let file = previewFile(for: item) else { return nil }
         return activePane.content.iconImage(for: file)
-            ?? ThumbnailCache.shared.cached(for: file, points: 32, iconMode: true)
+            ?? ThumbnailCache.shared.cached(for: file, points: 32, scale: window?.backingScaleFactor ?? 2, iconMode: true)
             ?? IconCache.shared.cachedItemIcon(path: file.path)
             ?? IconCache.shared.immediateIcon(for: file)
     }

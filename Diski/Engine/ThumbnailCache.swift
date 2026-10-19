@@ -27,17 +27,18 @@ final class ThumbnailCache {
     }
 
     /// Everything but the bucket (the modification date's bits: no Double formatting).
-    private func baseKey(for item: FileItem) -> String {
-        "\(item.path)|\(item.modified.bitPattern)|\(item.size)|"
+    /// The display scale is part of it: a 1x thumbnail drawn on a 2x display is blurry.
+    private func baseKey(for item: FileItem, scale: CGFloat) -> String {
+        "\(item.path)|\(item.modified.bitPattern)|\(item.size)|\(Int(max(scale, 1)))x|"
     }
 
     /// Icon-mode thumbnails (Quick Look's own decoration) are cached apart from plain ones.
-    private func key(for item: FileItem, bucket: Int, iconMode: Bool) -> String {
-        baseKey(for: item) + String(bucket) + (iconMode ? "|icon" : "")
+    private func key(for item: FileItem, bucket: Int, scale: CGFloat, iconMode: Bool) -> String {
+        baseKey(for: item, scale: scale) + String(bucket) + (iconMode ? "|icon" : "")
     }
 
-    func cached(for item: FileItem, points: CGFloat, iconMode: Bool = false) -> NSImage? {
-        let b = Self.bucket(for: points), base = baseKey(for: item), suffix = iconMode ? "|icon" : ""
+    func cached(for item: FileItem, points: CGFloat, scale: CGFloat, iconMode: Bool = false) -> NSImage? {
+        let b = Self.bucket(for: points), base = baseKey(for: item, scale: scale), suffix = iconMode ? "|icon" : ""
         if let image = cache.object(forKey: (base + String(b) + suffix) as NSString) { return image }
         // The next size up scales down cleanly; much larger images alias when a layer shrinks them.
         for larger in [32, 64, 128, 256, 512, 1024] where larger > b && larger <= b * 2 {
@@ -53,7 +54,7 @@ final class ThumbnailCache {
     func request(for item: FileItem, points: CGFloat, scale: CGFloat, iconMode: Bool = false,
                  completion: @escaping (NSImage?) -> Void) -> String? {
         let b = Self.bucket(for: points)
-        let k = key(for: item, bucket: b, iconMode: iconMode)
+        let k = key(for: item, bucket: b, scale: scale, iconMode: iconMode)
         if let image = cache.object(forKey: k as NSString) {
             completion(image)
             return nil

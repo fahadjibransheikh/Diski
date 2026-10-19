@@ -88,7 +88,7 @@ final class CollectionImagePrefetcher {
         }
         let scale = collection.window?.backingScaleFactor ?? 2
         for item in candidates where tokens[item.path] == nil && FileKinds.wantsThumbnail(item) {
-            guard ThumbnailCache.shared.cached(for: item, points: points, iconMode: true) == nil else { continue }
+            guard ThumbnailCache.shared.cached(for: item, points: points, scale: scale, iconMode: true) == nil else { continue }
             let path = item.path
             if let token = ThumbnailCache.shared.request(for: item, points: points, scale: scale, iconMode: true,
                                                          completion: { [weak self] _ in self?.tokens.removeValue(forKey: path) }) {
