@@ -88,6 +88,16 @@ protocol FileViewKeyHandling: AnyObject {
     func handleKeyDown(_ event: NSEvent, typeSelecting: Bool) -> Bool
 }
 
+extension NSEvent {
+    /// A plain typed letter, digit, space or "." (Shift allowed): what the
+    /// table-based views treat as type-to-select, so ⌘/⌃/⌥ combos don't count.
+    var isTypeSelectKey: Bool {
+        guard let chars = charactersIgnoringModifiers, !chars.isEmpty,
+              modifierFlags.intersection([.command, .control, .option]).isEmpty else { return false }
+        return chars.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == " " || $0 == "." }
+    }
+}
+
 final class FileOutlineView: NSOutlineView {
     weak var keyHandler: FileViewKeyHandling?
     /// Called when a drag leaves the list (spring-loading stops).
@@ -103,11 +113,7 @@ final class FileOutlineView: NSOutlineView {
     override func keyDown(with event: NSEvent) {
         let typing = ProcessInfo.processInfo.systemUptime - lastTypeSelect < 1.0
         if keyHandler?.handleKeyDown(event, typeSelecting: typing) == true { return }
-        if let chars = event.charactersIgnoringModifiers, !chars.isEmpty,
-           event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-           chars.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == " " || $0 == "." }) {
-            lastTypeSelect = ProcessInfo.processInfo.systemUptime
-        }
+        if event.isTypeSelectKey { lastTypeSelect = ProcessInfo.processInfo.systemUptime }
         super.keyDown(with: event)
     }
 

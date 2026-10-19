@@ -19,10 +19,7 @@ final class ColumnTableView: NSTableView {
             if onArrow?(event.keyCode == 123) == true { return }
         }
         if keyHandler?.handleKeyDown(event, typeSelecting: typing) == true { return }
-        if let chars = event.charactersIgnoringModifiers, !chars.isEmpty, flags.isEmpty || flags == .shift,
-           chars.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == " " || $0 == "." }) {
-            lastTypeSelect = ProcessInfo.processInfo.systemUptime
-        }
+        if event.isTypeSelectKey { lastTypeSelect = ProcessInfo.processInfo.systemUptime }
         super.keyDown(with: event)
     }
 

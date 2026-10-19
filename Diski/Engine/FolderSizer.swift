@@ -236,7 +236,7 @@ final class FolderSizer {
         guard !cache.isEmpty || !jobs.isEmpty else { return }
         var seen = Set<String>()
         for changed in changedPaths {
-            var path = changed.utf8.count > 1 && changed.utf8.last == UInt8(ascii: "/") ? String(changed.dropLast()) : changed
+            var path = DirectoryReader.normalized(changed)
             // Walk up the ancestors: a few hash lookups per event instead of
             // comparing every event with every cached folder.
             while seen.insert(path).inserted {

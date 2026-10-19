@@ -99,8 +99,7 @@ final class DirectoryWatcher {
         var changedFolders = Set<String>()
         var rescanRoots = Set<String>()
         for event in events {
-            var path = event.path
-            if path != "/" && path.utf8.last == UInt8(ascii: "/") { path.removeLast() }
+            let path = DirectoryReader.normalized(event.path)
             // Folders that changed themselves (created, renamed, attributes),
             // and watched items. Events without item flags count as folders.
             if !event.isFile || watched.contains(path) { changedFolders.insert(path) }

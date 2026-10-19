@@ -89,7 +89,7 @@ final class DirectoryStore {
         guard !watchCounts.isEmpty else { return }
         var folders = Set<String>()
         for raw in rawPaths {
-            var child = raw != "/" && raw.utf8.last == UInt8(ascii: "/") ? String(raw.dropLast()) : raw
+            var child = DirectoryReader.normalized(raw)
             var depth = 0
             while let slash = child.lastIndex(of: "/") {
                 let parent = slash == child.startIndex ? "/" : String(child[..<slash])
