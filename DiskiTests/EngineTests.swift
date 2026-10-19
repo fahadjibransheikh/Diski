@@ -142,13 +142,14 @@ final class EngineTests: XCTestCase {
     }
 
     private func runEngine(_ mode: CopyEngine.Mode, _ sources: [URL], to destination: URL?, clones: Bool,
-                           resolver: ConflictResolving? = nil) -> CopyEngine {
+                           resolver: ConflictResolving? = nil, maxPendingFiles: Int = 100_000) -> CopyEngine {
         let kind: FileOperation.Kind = mode == .move ? .move : (mode == .duplicate ? .duplicate : .copy)
         let operation = FileOperation(kind: kind, sources: sources, destination: destination)
         let engine = CopyEngine(operation: operation, mode: mode)
         engine.useClones = clones
         engine.streams = 6
         engine.resolver = resolver
+        engine.maxPendingFiles = maxPendingFiles
         engine.run()
         return engine
     }
@@ -243,6 +244,67 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(engine.errors.isEmpty, "\(engine.errors)")
         let names = Set(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("dst/Photos").path))
         XCTAssertEqual(names, ["a.jpg", "b.jpg", "c.jpg"])
+    }
+
+    /// Runs the engine off the test thread so a copy that hangs fails the test instead of freezing the run.
+    private func runEngineBounded(_ mode: CopyEngine.Mode, _ sources: [URL], to destination: URL?, clones: Bool,
+                                  maxPendingFiles: Int = 100_000, timeout: TimeInterval) -> CopyEngine? {
+        final class Box: @unchecked Sendable { var engine: CopyEngine? }
+        let box = Box()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            box.engine = self.runEngine(mode, sources, to: destination, clones: clones, maxPendingFiles: maxPendingFiles)
+            finished.signal()
+        }
+        return finished.wait(timeout: .now() + timeout) == .success ? box.engine : nil
+    }
+
+    func testPipeInsideFolderDoesNotHangCopy() throws {
+        try makeFile("src/a.txt", size: 10)
+        XCTAssertEqual(mkfifo(root.appendingPathComponent("src/pipe").path, 0o644), 0)
+        let destination = root.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let engine = runEngineBounded(.copy, [root.appendingPathComponent("src")], to: destination, clones: false, timeout: 10)
+        let finished = try XCTUnwrap(engine, "copy hung on a named pipe")
+        XCTAssertEqual(finished.errors.count, 1, "\(finished.errors)")
+        XCTAssertTrue(finished.errors.first?.contains("pipe") ?? false, "\(finished.errors)")
+        XCTAssertTrue(finished.created.isEmpty)
+    }
+
+    func testTopLevelPipeDoesNotHangCopy() throws {
+        let pipe = root.appendingPathComponent("pipe")
+        XCTAssertEqual(mkfifo(pipe.path, 0o644), 0)
+        for clones in [true, false] {
+            let destination = root.appendingPathComponent("dest-\(clones)")
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            let engine = runEngineBounded(.copy, [pipe], to: destination, clones: clones, timeout: 10)
+            let finished = try XCTUnwrap(engine, "copy hung on a top-level named pipe (clones: \(clones))")
+            XCTAssertEqual(finished.errors.count, 1, "\(finished.errors)")
+            XCTAssertTrue(finished.created.isEmpty)
+        }
+    }
+
+    func testQueueServesFilesFirstWhenBacklogIsFull() {
+        let queue = CopyEngine.TaskQueue()
+        queue.maxPendingFiles = 2
+        for i in 0..<3 { queue.push(.file(src: "s\(i)", dst: "d\(i)", size: 1, symlink: false)) }
+        queue.push(.directory(src: "s", dst: "d", exists: false))
+        func isFile(_ task: CopyEngine.Task?) -> Bool { if case .file = task { return true } else { return false } }
+        XCTAssertTrue(isFile(queue.next(cancelled: { false })), "directory served while the file backlog was full")
+        XCTAssertTrue(isFile(queue.next(cancelled: { false })))
+        guard case .directory = queue.next(cancelled: { false }) else { return XCTFail("directory not served once the backlog drained") }
+    }
+
+    func testTreeCopyCompletesWithTinyQueueLimit() throws {
+        try makeTree(at: "src", files: 40, depth: 4)
+        let destination = root.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let engine = runEngineBounded(.copy, [root.appendingPathComponent("src")], to: destination, clones: false,
+                                      maxPendingFiles: 4, timeout: 20)
+        let finished = try XCTUnwrap(engine, "tree copy with a tiny queue limit did not finish")
+        XCTAssertTrue(finished.errors.isEmpty, "\(finished.errors)")
+        try assertTreesEqual(root.appendingPathComponent("src"), destination.appendingPathComponent("src"))
     }
 
     func testUniqueNames() throws {

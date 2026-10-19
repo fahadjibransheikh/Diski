@@ -28,6 +28,7 @@ final class CopyEngine {
     weak var resolver: ConflictResolving?
     var useClones = true
     var streams = 6
+    var maxPendingFiles = 100_000
 
     private(set) var created: [URL] = []
     /// (original location, new location) for moved items.
@@ -245,13 +246,20 @@ final class CopyEngine {
             return true
         }
 
-        let sfd = open(src, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        // O_NONBLOCK: opening a FIFO must not wait for a writer; it has no effect on regular files.
+        let sfd = open(src, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard sfd >= 0 else {
             recordError("“\((src as NSString).lastPathComponent)” couldn’t be read: \(String(cString: strerror(errno)))")
             operation.update { $0.completedBytes += size }
             return false
         }
         defer { close(sfd) }
+        var info = stat()
+        guard fstat(sfd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            recordError("“\((src as NSString).lastPathComponent)” is a pipe, socket or device and can’t be copied.")
+            operation.update { $0.completedBytes += size }
+            return false
+        }
         let dfd = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
         guard dfd >= 0 else {
             recordError("“\((dst as NSString).lastPathComponent)” couldn’t be written: \(String(cString: strerror(errno)))")
@@ -296,15 +304,18 @@ final class CopyEngine {
 
     // MARK: - Folder trees
 
-    private enum Task {
+    enum Task {
         case directory(src: String, dst: String, exists: Bool)
         case file(src: String, dst: String, size: Int64, symlink: Bool)
     }
 
     /// Work queue shared by the copy workers. Folder tasks are served first so
     /// the whole tree is discovered (and the total size known) quickly.
-    private final class TaskQueue {
+    final class TaskQueue {
         let condition = NSCondition()
+        /// Directories are only served while fewer than this many files wait, so a huge tree isn't held in memory.
+        // shortcut: soft bound — one directory's entries are pushed at once, so a single flat folder with millions of files still queues them all; upgrade to a blocking push with help-out if that shows up.
+        var maxPendingFiles = 100_000
         var directories: [Task] = []
         var files: [Task?] = []
         var fileHead = 0
@@ -335,7 +346,7 @@ final class CopyEngine {
             defer { condition.unlock() }
             while true {
                 if cancelled() { condition.broadcast(); return nil }
-                if let task = directories.popLast() {
+                if files.count - fileHead < maxPendingFiles, let task = directories.popLast() {
                     inFlight += 1
                     directoriesInFlight += 1
                     return task
@@ -373,6 +384,7 @@ final class CopyEngine {
 
     private func copyTree(from src: String, to dst: String, merge: Bool, sameDevice: Bool) -> Bool {
         let queue = TaskQueue()
+        queue.maxPendingFiles = maxPendingFiles
         queue.push(.directory(src: src, dst: dst, exists: merge))
         let workers = max(1, streams)
 
