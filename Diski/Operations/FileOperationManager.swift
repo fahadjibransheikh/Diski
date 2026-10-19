@@ -18,6 +18,9 @@ final class FileOperationManager: NSObject, ConflictResolving {
     var conflictPresenter: ((_ source: URL, _ existing: URL, _ operation: FileOperation,
                              _ completion: @escaping (ConflictResolution, Bool) -> Void) -> Void)?
 
+    /// Replaces the error alert; tests set it because `NSAlert.runModal()` would hang them.
+    var errorPresenter: ((_ errors: [String], _ title: String) -> Void)?
+
     var activeOperations: [FileOperation] { operations.filter { !$0.state.isDone } }
 
     struct OperationError: LocalizedError {
@@ -263,6 +266,13 @@ final class FileOperationManager: NSObject, ConflictResolving {
         let target = parent.appendingPathComponent(newName)
         // Case-only renames refer to the same file on case-insensitive volumes.
         let caseOnly = newName.lowercased() == oldName.lowercased()
+        // rename(2) silently replaces: on a case-sensitive volume "foo" -> "Foo" would clobber a separate "Foo".
+        if caseOnly {
+            var from = stat(), to = stat()
+            if lstat(url.path, &from) == 0, lstat(target.path, &to) == 0, (from.st_dev, from.st_ino) != (to.st_dev, to.st_ino) {
+                throw OperationError(message: "The name “\(newName)” is already taken. Please choose a different name.")
+            }
+        }
         let result = caseOnly ? Darwin.rename(url.path, target.path) : renamex_np(url.path, target.path, CopyEngine.renameExcl)
         if result != 0 {
             if errno == EEXIST {
@@ -293,10 +303,13 @@ final class FileOperationManager: NSObject, ConflictResolving {
             throw OperationError(message: "The folder couldn’t be created: \(String(cString: strerror(errno))).")
         }
         var movedPairs: [(from: URL, to: URL)] = []
+        var failures: [String] = []
         for item in items {
             let target = folder.appendingPathComponent(item.lastPathComponent)
             if renamex_np(item.path, target.path, CopyEngine.renameExcl) == 0 {
                 movedPairs.append((item, target))
+            } else {
+                failures.append("“\(item.lastPathComponent)” couldn’t be moved: \(String(cString: strerror(errno))).")
             }
         }
         undoManager.registerUndo(withTarget: self) { manager in
@@ -305,6 +318,7 @@ final class FileOperationManager: NSObject, ConflictResolving {
         }
         undoManager.setActionName("New Folder")
         refresh([directory])
+        if !failures.isEmpty { presentErrors(failures, title: "Some items couldn’t be moved into the new folder.") }
         return folder
     }
 
@@ -390,26 +404,39 @@ final class FileOperationManager: NSObject, ConflictResolving {
 
     func makeSymlinks(for urls: [URL]) {
         var created: [URL] = []
+        var failures: [String] = []
         for url in urls {
             let directory = url.deletingLastPathComponent()
             let name = CopyEngine.uniqueName(for: url.lastPathComponent + " link", in: directory.path,
                                              style: .number, splitExtension: false)
             let link = directory.appendingPathComponent(name)
-            if symlink(url.path, link.path) == 0 { created.append(link) }
+            if symlink(url.path, link.path) == 0 {
+                created.append(link)
+            } else {
+                failures.append("“\(url.lastPathComponent)” couldn’t be linked: \(String(cString: strerror(errno))).")
+            }
         }
         if !created.isEmpty {
             undoManager.registerUndo(withTarget: self) { manager in manager.trashNow(created) }
             undoManager.setActionName("Make Symbolic Link")
             refresh(created.map { $0.deletingLastPathComponent() })
         }
+        if !failures.isEmpty { presentErrors(failures, title: "Some links couldn’t be created.") }
     }
 
-    /// Moves items back to where they were (undo of a same-volume move).
+    /// Moves items back to where they were (undo of a move). Same-volume pairs are renamed back right away;
+    /// cross-volume pairs (EXDEV) go through the async `move` (conflicts, progress, errors); the rest are reported.
     func moveBackNow(_ pairs: [(from: URL, to: URL)]) {
         var reverted: [(from: URL, to: URL)] = []
+        var crossVolume: [(from: URL, to: URL)] = []
+        var failures: [String] = []
         for pair in pairs {
             if renamex_np(pair.to.path, pair.from.path, CopyEngine.renameExcl) == 0 {
                 reverted.append((pair.to, pair.from))
+            } else if errno == EXDEV {
+                crossVolume.append(pair)
+            } else {
+                failures.append("“\(pair.to.lastPathComponent)” couldn’t be moved back: \(String(cString: strerror(errno))).")
             }
         }
         if !reverted.isEmpty {
@@ -417,6 +444,12 @@ final class FileOperationManager: NSObject, ConflictResolving {
             undoManager.setActionName("Move")
         }
         refresh(pairs.flatMap { [$0.from.deletingLastPathComponent(), $0.to.deletingLastPathComponent()] })
+        // shortcut: cross-volume move-back is async, so a replaced original is put back beside it as “name 2”;
+        // chain putBack to the move's completion if users hit it.
+        for (parent, group) in Dictionary(grouping: crossVolume, by: { $0.from.deletingLastPathComponent() }) {
+            move(group.map { $0.to }, to: parent)
+        }
+        if !failures.isEmpty { presentErrors(failures, title: "Some items couldn’t be moved back.") }
     }
 
     // MARK: - Compress
@@ -577,6 +610,7 @@ final class FileOperationManager: NSObject, ConflictResolving {
     }
 
     private func presentErrors(_ errors: [String], title: String) {
+        if let errorPresenter { errorPresenter(errors, title); return }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = title
